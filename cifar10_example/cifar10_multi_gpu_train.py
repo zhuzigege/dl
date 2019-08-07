@@ -51,7 +51,9 @@ import numpy as np
 from six.moves import xrange  # pylint: disable=redefined-builtin
 import tensorflow as tf
 #from tensorflow.models.image.cifar10 import cifar10
-import cifar10_example
+import sys
+sys.path.append("/home/ai/zhuzi/dl")
+from cifar10_example import cifar10
 # pylint: disable=unused-import,g-bad-import-order
 
 FLAGS = tf.app.flags.FLAGS
@@ -67,7 +69,7 @@ tf.app.flags.DEFINE_boolean('log_device_placement', False,
                             """Whether to log device placement.""")
 
 
-def tower_loss(scope):
+def tower_loss(scope, images, labels):
   """Calculate the total loss on a single tower running the CIFAR model.
 
   Args:
@@ -76,15 +78,12 @@ def tower_loss(scope):
   Returns:
      Tensor of shape [] containing the total loss for a batch of data
   """
-  # Get images and labels for CIFAR-10.
-  images, labels = cifar10_example.distorted_inputs()
-
   # Build inference Graph.
-  logits = cifar10_example.inference(images)
+  logits = cifar10.inference(images)
 
   # Build the portion of the Graph calculating the losses. Note that we will
   # assemble the total_loss using a custom function below.
-  _ = cifar10_example.loss(logits, labels)
+  _ = cifar10.loss(logits, labels)
 
   # Assemble all of the losses for the current tower only.
   losses = tf.get_collection('losses', scope)
@@ -93,22 +92,23 @@ def tower_loss(scope):
   total_loss = tf.add_n(losses, name='total_loss')
 
   # Compute the moving average of all individual losses and the total loss.
-  loss_averages = tf.train.ExponentialMovingAverage(0.9, name='avg')
-  loss_averages_op = loss_averages.apply(losses + [total_loss])
+  # loss_averages = tf.train.ExponentialMovingAverage(0.9, name='avg')
+  # loss_averages_op = loss_averages.apply(losses + [total_loss])
 
   # Attach a scalar summary to all individual losses and the total loss; do the
   # same for the averaged version of the losses.
   for l in losses + [total_loss]:
     # Remove 'tower_[0-9]/' from the name in case this is a multi-GPU training
     # session. This helps the clarity of presentation on tensorboard.
-    loss_name = re.sub('%s_[0-9]*/' % cifar10_example.TOWER_NAME, '', l.op.name)
+    loss_name = re.sub('%s_[0-9]*/' % cifar10.TOWER_NAME, '', l.op.name)
     # Name each loss as '(raw)' and name the moving average version of the loss
     # as the original loss name.
-    tf.scalar_summary(loss_name +' (raw)', l)
-    tf.scalar_summary(loss_name, loss_averages.average(l))
+    # tf.summary.scalar(loss_name +' (raw)', l)
+    # tf.summary.scalar(loss_name, loss_averages.average(l))
+    tf.summary.scalar(loss_name, l)
 
-  with tf.control_dependencies([loss_averages_op]):
-    total_loss = tf.identity(total_loss)
+  # with tf.control_dependencies([loss_averages_op]):
+  #  total_loss = tf.identity(total_loss)
   return total_loss
 
 
@@ -138,7 +138,8 @@ def average_gradients(tower_grads):
       grads.append(expanded_g)
 
     # Average over the 'tower' dimension.
-    grad = tf.concat(0, grads)
+    # grad = tf.concat(0, grads)
+    grad=tf.concat(axis=0,values=grads)
     grad = tf.reduce_mean(grad, 0)
 
     # Keep in mind that the Variables are redundant because they are shared
@@ -160,78 +161,89 @@ def train():
         initializer=tf.constant_initializer(0), trainable=False)
 
     # Calculate the learning rate schedule.
-    num_batches_per_epoch = (cifar10_example.NUM_EXAMPLES_PER_EPOCH_FOR_TRAIN /
+    num_batches_per_epoch = (cifar10.NUM_EXAMPLES_PER_EPOCH_FOR_TRAIN /
                              FLAGS.batch_size)
-    decay_steps = int(num_batches_per_epoch * cifar10_example.NUM_EPOCHS_PER_DECAY)
+    decay_steps = int(num_batches_per_epoch * cifar10.NUM_EPOCHS_PER_DECAY)
 
     # Decay the learning rate exponentially based on the number of steps.
-    lr = tf.train.exponential_decay(cifar10_example.INITIAL_LEARNING_RATE,
+    lr = tf.train.exponential_decay(cifar10.INITIAL_LEARNING_RATE,
                                     global_step,
                                     decay_steps,
-                                    cifar10_example.LEARNING_RATE_DECAY_FACTOR,
+                                    cifar10.LEARNING_RATE_DECAY_FACTOR,
                                     staircase=True)
 
     # Create an optimizer that performs gradient descent.
     opt = tf.train.GradientDescentOptimizer(lr)
+    
+    # Get images and labels for CIFAR-10.
+    images, labels = cifar10.distorted_inputs()
+    images = tf.reshape(images, [cifar10.FLAGS.batch_size, 24, 24, 3])
+    labels = tf.reshape(labels, [cifar10.FLAGS.batch_size])
+    batch_queue = tf.contrib.slim.prefetch_queue.prefetch_queue([images, labels], capacity=2 * FLAGS.num_gpus)
 
     # Calculate the gradients for each model tower.
     tower_grads = []
-    for i in xrange(FLAGS.num_gpus):
-      with tf.device('/gpu:%d' % i):
-        with tf.name_scope('%s_%d' % (cifar10_example.TOWER_NAME, i)) as scope:
-          # Calculate the loss for one tower of the CIFAR model. This function
-          # constructs the entire CIFAR model but shares the variables across
-          # all towers.
-          loss = tower_loss(scope)
+    with tf.variable_scope(tf.get_variable_scope()):
+    #if 2>1:
+      for i in xrange(FLAGS.num_gpus):
+        with tf.device('/gpu:%d' % i):
+          with tf.name_scope('%s_%d' % (cifar10.TOWER_NAME, i)) as scope:
+            # Calculate the loss for one tower of the CIFAR model. This function
+            # constructs the entire CIFAR model but shares the variables across
+            # all towers.
+            image_batch, label_batch = batch_queue.dequeue()
 
-          # Reuse variables for the next tower.
-          tf.get_variable_scope().reuse_variables()
+            loss = tower_loss(scope, image_batch, label_batch)
 
-          # Retain the summaries from the final tower.
-          summaries = tf.get_collection(tf.GraphKeys.SUMMARIES, scope)
+            # Reuse variables for the next tower.
+            tf.get_variable_scope().reuse_variables()
 
-          # Calculate the gradients for the batch of data on this CIFAR tower.
-          grads = opt.compute_gradients(loss)
+            # Retain the summaries from the final tower.
+            summaries = tf.get_collection(tf.GraphKeys.SUMMARIES, scope)
 
-          # Keep track of the gradients across all towers.
-          tower_grads.append(grads)
+            # Calculate the gradients for the batch of data on this CIFAR tower.
+            grads = opt.compute_gradients(loss)
+
+            # Keep track of the gradients across all towers.
+            tower_grads.append(grads)
 
     # We must calculate the mean of each gradient. Note that this is the
     # synchronization point across all towers.
     grads = average_gradients(tower_grads)
 
     # Add a summary to track the learning rate.
-    summaries.append(tf.scalar_summary('learning_rate', lr))
+    summaries.append(tf.summary.scalar('learning_rate', lr))
 
     # Add histograms for gradients.
     for grad, var in grads:
-      if grad:
+      if grad is not None:
         summaries.append(
-            tf.histogram_summary(var.op.name + '/gradients', grad))
+            tf.summary.histogram(var.op.name + '/gradients', grad))
 
     # Apply the gradients to adjust the shared variables.
     apply_gradient_op = opt.apply_gradients(grads, global_step=global_step)
 
     # Add histograms for trainable variables.
     for var in tf.trainable_variables():
-      summaries.append(tf.histogram_summary(var.op.name, var))
+      summaries.append(tf.summary.histogram(var.op.name, var))
 
     # Track the moving averages of all trainable variables.
     variable_averages = tf.train.ExponentialMovingAverage(
-        cifar10_example.MOVING_AVERAGE_DECAY, global_step)
+        cifar10.MOVING_AVERAGE_DECAY, global_step)
     variables_averages_op = variable_averages.apply(tf.trainable_variables())
 
     # Group all updates to into a single train op.
     train_op = tf.group(apply_gradient_op, variables_averages_op)
 
     # Create a saver.
-    saver = tf.train.Saver(tf.all_variables())
+    saver = tf.train.Saver(tf.global_variables())
 
     # Build the summary operation from the last tower summaries.
-    summary_op = tf.merge_summary(summaries)
+    summary_op = tf.summary.merge(summaries)
 
     # Build an initialization operation to run below.
-    init = tf.initialize_all_variables()
+    # init = tf.initialize_all_variables()
+    init = tf.global_variables_initializer()
 
     # Start running operations on the Graph. allow_soft_placement must be set to
     # True to build towers on GPU, as some of the ops do not have GPU
@@ -244,8 +256,7 @@ def train():
     # Start the queue runners.
     tf.train.start_queue_runners(sess=sess)
 
-    summary_writer = tf.train.SummaryWriter(FLAGS.train_dir,
-                                            graph_def=sess.graph_def)
+    summary_writer = tf.summary.FileWriter(FLAGS.train_dir, sess.graph)
 
     for step in xrange(FLAGS.max_steps):
       start_time = time.time()
@@ -267,6 +278,7 @@ def train():
       if step % 100 == 0:
         summary_str = sess.run(summary_op)
         summary_writer.add_summary(summary_str, step)
+        summary_writer.flush()
 
       # Save the model checkpoint periodically.
       if step % 1000 == 0 or (step + 1) == FLAGS.max_steps:
@@ -275,7 +287,7 @@ def train():
 
 
 def main(argv=None):  # pylint: disable=unused-argument
-  cifar10_example.maybe_download_and_extract()
+  cifar10.maybe_download_and_extract()
   if gfile.Exists(FLAGS.train_dir):
     gfile.DeleteRecursively(FLAGS.train_dir)
   gfile.MakeDirs(FLAGS.train_dir)

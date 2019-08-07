@@ -47,6 +47,8 @@ import numpy as np
 from six.moves import xrange  # pylint: disable=redefined-builtin
 import tensorflow as tf
 
+import sys
+sys.path.append("/home/ai/zhuzi/dl")
 #from tensorflow.models.image.cifar10 import cifar10
 # import cifar10.cifar10 as cifar10
 from cifar10_example import cifar10
@@ -66,9 +68,12 @@ def train():
   """Train CIFAR-10 for a number of steps."""
   with tf.Graph().as_default():
     global_step = tf.Variable(0, trainable=False)
+    # global_step = tf.train.get_or_create_global_step()
 
     # Get images and labels for CIFAR-10.
-    images, labels = cifar10.distorted_inputs()
+    # images, labels = cifar10.distorted_inputs()
+    with tf.device('/cpu:0'):
+      images, labels = cifar10.distorted_inputs()
 
     # Build a Graph that computes the logits predictions from the
     # inference model.
